@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use rfd::FileDialog;
+use egui::{RichText, Color32};
+use std::time::{Instant, Duration};
 
 pub struct Spotify2MediaApp {
     csv_path: Option<PathBuf>,
@@ -19,6 +21,11 @@ pub struct Spotify2MediaApp {
     show_about: bool,
     theme_is_dark: bool,
     confirm_dialog_open: bool,
+    yt_dlp_path: PathBuf,
+    ffmpeg_path: PathBuf,
+    log: Arc<Mutex<Vec<String>>>,
+    start_time: Option<Instant>,
+    cancel_requested: Arc<Mutex<bool>>,
 }
 
 impl Default for Spotify2MediaApp {
@@ -37,6 +44,11 @@ impl Default for Spotify2MediaApp {
             show_about: false,
             theme_is_dark: true,
             confirm_dialog_open: false,
+            yt_dlp_path: PathBuf::from("yt-dlp"),
+            ffmpeg_path: PathBuf::from("ffmpeg"),
+            log: Arc::new(Mutex::new(Vec::new())),
+            start_time: None,
+            cancel_requested: Arc::new(Mutex::new(false)),
         }
     }
 }
@@ -46,28 +58,32 @@ impl App for Spotify2MediaApp {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Spotify2Media (Rust Port)");
-                if ui.button("About").on_hover_text("More info about this app").clicked() {
-                    self.show_about = true;
-                }
-                if ui.button("Toggle Theme").on_hover_text("Switch between dark and light mode").clicked() {
+                if ui.button("About").clicked() { self.show_about = true; }
+                if ui.button("Toggle Theme").clicked() {
                     self.theme_is_dark = !self.theme_is_dark;
-                    if self.theme_is_dark {
-                        ctx.set_visuals(egui::Visuals::dark());
-                    } else {
-                        ctx.set_visuals(egui::Visuals::light());
-                    }
+                    ctx.set_visuals(if self.theme_is_dark { egui::Visuals::dark() } else { egui::Visuals::light() });
                 }
-                if ui.button("Clear errors").on_hover_text("Clear error and status messages").clicked() {
-                    self.last_error = None;
-                    *self.status.lock().unwrap() = String::from("Ready.");
+                if ui.button("Reset").on_hover_text("Reset all fields").clicked() {
+                    *self = Self::default();
                 }
             });
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            // Error/status area
             if let Some(err) = &self.last_error {
-                ui.colored_label(egui::Color32::RED, format!("Error: {err}"));
+                ui.horizontal(|ui| {
+                    ui.colored_label(Color32::RED, format!("❌ Error: {err}"));
+                    if ui.button("Copy").on_hover_text("Copy error to clipboard").clicked() {
+                        ui.output_mut(|o| o.copied_text = err.clone());
+                    }
+                });
+            } else {
+                ui.colored_label(Color32::LIGHT_GREEN, format!("Status: {}", self.status.lock().unwrap()));
             }
+
+            ui.separator();
+            ui.heading("Step 1: Select Files");
 
             ui.horizontal(|ui| {
                 if ui.add_enabled(!self.is_running, egui::Button::new("Select CSV")).clicked() {
@@ -85,7 +101,9 @@ impl App for Spotify2MediaApp {
                     }
                 }
                 if let Some(path) = &self.csv_path {
-                    ui.label(format!("CSV: {}", path.display()));
+                    if ui.link(path.display().to_string()).clicked() {
+                        // Optionally open in explorer
+                    }
                 }
             });
 
@@ -97,75 +115,169 @@ impl App for Spotify2MediaApp {
                     }
                 }
                 if let Some(dir) = &self.output_dir {
-                    ui.label(format!("Output: {}", dir.display()));
+                    if ui.link(dir.display().to_string()).clicked() {
+                        // Optionally open in explorer
+                    }
+                }
+            });
+
+            // yt-dlp/ffmpeg path settings
+            ui.separator();
+            ui.collapsing("Advanced: yt-dlp/ffmpeg paths", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("yt-dlp path:");
+                    let mut path_str = self.yt_dlp_path.display().to_string();
+                    if ui.text_edit_singleline(&mut path_str).changed() {
+                        self.yt_dlp_path = PathBuf::from(path_str.clone());
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("ffmpeg path:");
+                    let mut path_str = self.ffmpeg_path.display().to_string();
+                    if ui.text_edit_singleline(&mut path_str).changed() {
+                        self.ffmpeg_path = PathBuf::from(path_str.clone());
+                    }
+                });
+                if ui.button("Test yt-dlp/ffmpeg").clicked() {
+                    let yt_dlp = self.yt_dlp_path.clone();
+                    let ffmpeg = self.ffmpeg_path.clone();
+                    let log = Arc::clone(&self.log);
+                    thread::spawn(move || {
+                        let yt_dlp_ok = std::process::Command::new(&yt_dlp).arg("--version").output().is_ok();
+                        let ffmpeg_ok = std::process::Command::new(&ffmpeg).arg("-version").output().is_ok();
+                        let mut log = log.lock().unwrap();
+                        log.push(format!("yt-dlp: {}", if yt_dlp_ok { "OK" } else { "NOT FOUND" }));
+                        log.push(format!("ffmpeg: {}", if ffmpeg_ok { "OK" } else { "NOT FOUND" }));
+                    });
                 }
             });
 
             if !self.tracks.is_empty() {
-                ui.collapsing("CSV Preview (first 5 rows)", |ui| {
+                ui.separator();
+                ui.collapsing(format!("CSV Preview (showing first 5 of {} tracks)", self.tracks.len()), |ui| {
                     for t in self.tracks.iter().take(5) {
                         ui.label(format!("{} — {} [{}]", t.title, t.artist, t.album));
                     }
                 });
+                ui.label(format!("Total tracks loaded: {}", self.tracks.len()));
             }
 
             ui.separator();
+            ui.heading("Step 2: Settings");
 
-            ui.checkbox(&mut self.config.transcode_mp3, "Transcode to MP3")
-                .on_hover_text("Convert downloaded files to MP3 for maximum compatibility.");
-            ui.checkbox(&mut self.config.generate_m3u, "Generate M3U")
-                .on_hover_text("Create an M3U playlist file with the downloaded tracks.");
-            ui.checkbox(&mut self.config.exclude_instrumentals, "Exclude instrumentals")
-                .on_hover_text("Try to skip instrumental versions in your playlist.");
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.config.transcode_mp3, "Transcode to MP3")
+                    .on_hover_text("Convert downloaded files to MP3 for maximum compatibility.");
+                ui.checkbox(&mut self.config.generate_m3u, "Generate M3U")
+                    .on_hover_text("Create an M3U playlist file with the downloaded tracks.");
+                ui.checkbox(&mut self.config.exclude_instrumentals, "Exclude instrumentals")
+                    .on_hover_text("Try to skip instrumental versions in your playlist.");
+            });
+
+            ui.collapsing("Show current settings", |ui| {
+                ui.monospace(format!("{:#?}", self.config));
+            });
 
             ui.separator();
+            ui.heading("Step 3: Convert");
 
-            let (curr, total) = *self.progress.lock().unwrap();
-            if self.is_running {
-                ui.add(egui::ProgressBar::new(curr as f32 / total.max(1) as f32)
-                    .show_percentage()
-                    .desired_width(400.0)
-                    .text(format!("{} / {}", curr, total)));
-            }
+            let can_convert = !self.is_running && self.csv_path.is_some() && self.output_dir.is_some() && !self.tracks.is_empty();
 
-            if ui.add_enabled(!self.is_running, egui::Button::new("Convert Playlist"))
-                .on_hover_text("Start downloading and tagging tracks.").clicked() 
-            {
+            let convert_btn = ui.add_enabled(
+                can_convert,
+                egui::Button::new("Convert Playlist")
+                    .fill(if can_convert { egui::Color32::DARK_GREEN } else { egui::Color32::GRAY })
+            ).on_hover_text("Start downloading and tagging tracks.");
+
+            if convert_btn.clicked() {
                 self.confirm_dialog_open = true;
             }
 
+            if !can_convert {
+                ui.label(egui::RichText::new("Please select a CSV and output folder to enable conversion.").color(egui::Color32::YELLOW));
+            }
+
+            // Progress and cancel
+            let (curr, total) = *self.progress.lock().unwrap();
+            if self.is_running {
+                let elapsed = self.start_time.map(|t| t.elapsed()).unwrap_or(Duration::ZERO);
+                let percent = curr as f32 / total.max(1) as f32;
+                let eta = if curr > 0 {
+                    let avg = elapsed / curr as u32;
+                    avg * (total as u32 - curr as u32)
+                } else {
+                    Duration::ZERO
+                };
+                ui.add(egui::ProgressBar::new(percent)
+                    .show_percentage()
+                    .desired_width(400.0)
+                    .text(format!("{} / {} (ETA: {:?})", curr, total, eta)));
+                if ui.button("Cancel").clicked() {
+                    *self.cancel_requested.lock().unwrap() = true;
+                }
+                ui.spinner();
+            }
+
+            // Log window
+            ui.separator();
+            ui.collapsing("Log", |ui| {
+                let log = self.log.lock().unwrap();
+                for line in log.iter().rev().take(30) {
+                    ui.label(line);
+                }
+            });
+
+            // Confirm dialog logic
             if self.confirm_dialog_open {
+                let mut dialog_open = true;
+                let mut should_close_dialog = false;
                 egui::Window::new("Confirm Conversion")
                     .collapsible(false)
                     .resizable(false)
+                    .open(&mut dialog_open)
                     .show(ctx, |ui| {
                         ui.label("Are you sure you want to start playlist conversion?");
                         if ui.button("Yes, start").clicked() {
-                            self.confirm_dialog_open = false;
+                            should_close_dialog = true;
                             if let (Some(_csv), Some(out_dir)) = (&self.csv_path, &self.output_dir) {
                                 let config = self.config.clone();
                                 let out_dir = out_dir.clone();
                                 let tracks = self.tracks.clone();
-                                let status = Arc::clone(&self.status);
-                                let progress = Arc::clone(&self.progress);
-                                let yt_dlp_path = PathBuf::from("yt-dlp");
-                                let ffmpeg_path = PathBuf::from("ffmpeg");
+                                let status_main = Arc::clone(&self.status);
+                                let progress_main = Arc::clone(&self.progress);
+                                let yt_dlp_path = self.yt_dlp_path.clone();
+                                let ffmpeg_path = self.ffmpeg_path.clone();
+                                let log = Arc::clone(&self.log);
+                                let cancel_requested = Arc::clone(&self.cancel_requested);
 
                                 self.is_running = true;
                                 self.last_error = None;
-                                *status.lock().unwrap() = "Starting conversion...".into();
-                                *progress.lock().unwrap() = (0, tracks.len().max(1));
+                                *status_main.lock().unwrap() = "Starting conversion...".into();
+                                *progress_main.lock().unwrap() = (0, tracks.len().max(1));
+                                self.start_time = Some(Instant::now());
 
                                 thread::spawn(move || {
-                                    let cb = |i: usize, total: usize, track: &str| {
-                                        *progress.lock().unwrap() = (i + 1, total.max(1));
-                                        *status.lock().unwrap() = format!("Downloading: {} ({}/{})", track, i + 1, total);
+                                    let status_cb = Arc::clone(&status_main);
+                                    let progress_cb = Arc::clone(&progress_main);
+                                    let log_cb = Arc::clone(&log);
+                                    let cancel_cb = Arc::clone(&cancel_requested);
+                                    let cb = move |i: usize, total: usize, track: &str| {
+                                        *progress_cb.lock().unwrap() = (i + 1, total.max(1));
+                                        *status_cb.lock().unwrap() = format!(
+                                            "Downloading: {} ({}/{})", track, i + 1, total
+                                        );
                                     };
-                                    let result = convert_playlist(&tracks, &config, &yt_dlp_path, &ffmpeg_path, &out_dir, cb);
+                                    let result = convert_playlist(
+                                        &tracks, &config, &yt_dlp_path, &ffmpeg_path, &out_dir, cb
+                                    );
                                     match result {
-                                        Ok(_) => *status.lock().unwrap() = format!(
-                                            "Conversion finished! Downloaded {}/{} tracks.", tracks.len(), tracks.len()),
-                                        Err(e) => *status.lock().unwrap() = format!("Error: {e}"),
+                                        Ok(_) => *status_main.lock().unwrap() = format!(
+                                            "Conversion finished! Downloaded {}/{} tracks.", tracks.len(), tracks.len()
+                                        ),
+                                        Err(e) => {
+                                            *status_main.lock().unwrap() = format!("Error: {e}");
+                                            log_cb.lock().unwrap().push(format!("Error: {e}"));
+                                        }
                                     }
                                 });
                             } else {
@@ -173,9 +285,12 @@ impl App for Spotify2MediaApp {
                             }
                         }
                         if ui.button("Cancel").clicked() {
-                            self.confirm_dialog_open = false;
+                            should_close_dialog = true;
                         }
                     });
+                if should_close_dialog || !dialog_open {
+                    self.confirm_dialog_open = false;
+                }
             }
 
             ui.separator();
@@ -190,10 +305,6 @@ impl App for Spotify2MediaApp {
                 }
             });
 
-            ui.separator();
-
-            ui.label(format!("Status: {}", self.status.lock().unwrap()));
-
             if self.is_running {
                 let s = self.status.lock().unwrap();
                 if s.starts_with("Conversion finished!") || s.starts_with("Error:") {
@@ -204,10 +315,13 @@ impl App for Spotify2MediaApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         });
 
+        // About dialog
         if self.show_about {
             let mut show_about_open = true;
             egui::Window::new("About Spotify2Media Rust Port")
                 .open(&mut show_about_open)
+                .collapsible(false)
+                .resizable(false)
                 .show(ctx, |ui| {
                     ui.label("Spotify2Media Rust Port");
                     ui.label("By fentbuscoding.");
