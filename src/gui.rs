@@ -65,7 +65,6 @@ impl App for Spotify2MediaApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Error banner
             if let Some(err) = &self.last_error {
                 ui.colored_label(egui::Color32::RED, format!("Error: {err}"));
             }
@@ -121,7 +120,6 @@ impl App for Spotify2MediaApp {
 
             ui.separator();
 
-            // Progress Bar
             let (curr, total) = *self.progress.lock().unwrap();
             if self.is_running {
                 ui.add(egui::ProgressBar::new(curr as f32 / total.max(1) as f32)
@@ -133,7 +131,6 @@ impl App for Spotify2MediaApp {
             if ui.add_enabled(!self.is_running, egui::Button::new("Convert Playlist"))
                 .on_hover_text("Start downloading and tagging tracks.").clicked() 
             {
-                // Confirm dialog before starting
                 self.confirm_dialog_open = true;
             }
 
@@ -145,15 +142,12 @@ impl App for Spotify2MediaApp {
                         ui.label("Are you sure you want to start playlist conversion?");
                         if ui.button("Yes, start").clicked() {
                             self.confirm_dialog_open = false;
-                            // Start conversion logic
                             if let (Some(_csv), Some(out_dir)) = (&self.csv_path, &self.output_dir) {
                                 let config = self.config.clone();
                                 let out_dir = out_dir.clone();
                                 let tracks = self.tracks.clone();
                                 let status = Arc::clone(&self.status);
                                 let progress = Arc::clone(&self.progress);
-
-                                // You must set the correct path to yt-dlp and ffmpeg on your system!
                                 let yt_dlp_path = PathBuf::from("yt-dlp");
                                 let ffmpeg_path = PathBuf::from("ffmpeg");
 
@@ -210,7 +204,6 @@ impl App for Spotify2MediaApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         });
 
-        // About dialog fix: use local variable for open state!
         if self.show_about {
             let mut show_about_open = true;
             egui::Window::new("About Spotify2Media Rust Port")
@@ -221,9 +214,6 @@ impl App for Spotify2MediaApp {
                     ui.label("Powered by eframe/egui.");
                     ui.label("Downloads and tags music from Spotify playlists using yt-dlp & ffmpeg.");
                     ui.label("Project: github.com/fentbuscoding/spotify2media-rust");
-                    if ui.button("Close").clicked() {
-                        // just let egui close the window, handled below
-                    }
                 });
             self.show_about = show_about_open;
         }
